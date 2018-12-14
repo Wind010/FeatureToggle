@@ -1,10 +1,11 @@
-﻿#if NETFULL
-
+﻿
 using System;
 using System.Configuration;
 using System.Data.SqlClient;
+using System.IO;
 using System.Linq;
-using FeatureToggle;
+
+using Microsoft.Extensions.Configuration;
 
 namespace FeatureToggle.Internal
 {
@@ -12,22 +13,90 @@ namespace FeatureToggle.Internal
     {
         private const string AppSettingsKeyValuesIsEmptyErrorMessage = "The <appSettings> value for key '{0}' is empty.";
         private const string NamedConnectionStringsValueIsEmptyErrorMessage = "The <connectionStrings> value for connection named '{0}' is empty.";
+        private const string CouldNotFindValueForMessage = "Could not find value for '{0}'.";
+        private const string TheAppSettingsKeyWasNotFound = "The appSettings key '{0}' was not found.";
+#if NETFULL
 
         public bool EvaluateBooleanToggleValue(IFeatureToggle toggle)
         {
             var connectionString = GetConnectionStringFromConfig(toggle);
             var sqlCommandText = GetCommandTextFromAppConfig(toggle);
 
-            using (var connection = new SqlConnection(connectionString))
-            {
-                connection.Open();
+            return RunQuery(connectionString, sqlCommandText);
+        }
 
-                using (var cmd = new SqlCommand(sqlCommandText, connection))
-                {
-                    return (bool)cmd.ExecuteScalar();
-                }
+
+#if NETCORE
+
+        /// <summary>
+        ///  "FeatureToggle": {
+        ///     "SomeSqlServerToggle" : {
+        ///         "ConnectionString" : "Data Source=.\SQLEXPRESS;Initial Catalog=FeatureToggleIntegrationTests;Integrated Security=True;Pooling=False"" 
+        ///         "SqlStatement" : "SELECT select Value from Toggles where ToggleName = 'MySqlServerToggleFalse'"
+        ///     }
+        ///  },
+        ///  
+        /// </summary>
+        /// <param name="configuration"></param>
+        /// <param name="toggle"></param>
+        /// <returns></returns>
+        public bool EvaluateBooleanToggleValue(IFeatureToggle toggle)
+        {
+            IConfigurationRoot configuration = GetConfiguration();
+
+            var connectionString = GetConnectionStringFromAppSettings(toggle);
+            var sqlCommandText = GetCommandTextFromAppSettings(toggle);
+
+            return RunQuery(connectionString, sqlCommandText);
+        }
+
+
+        private IConfigurationRoot GetConfiguration()
+        {
+            const string appSettings = "appsettings";
+            const string json = "json";
+            string environmentName = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+
+            var builder = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile($"{appSettings}.{json}", optional: false, reloadOnChange: true)
+                .AddJsonFile($"{appSettings}.{environmentName}.{json}", optional: true, reloadOnChange: true);
+
+            return builder.Build();
+        }
+
+        private string GetConnectionStringFromAppSettings(IConfigurationRoot configuration, IFeatureToggle toggle)
+        {
+            string prefixedToggleConfigName = $"{ToggleConfigurationSettings.Prefix}{toggle.GetType().Name}";
+            string appSettingsConnectionStringKey = $"{prefixedToggleConfigName}::ConnectionString";
+
+            string connectionString = Configuration.Get<string>(appSettingsConnectionStringKey);
+
+            bool isConnectionStringMissing = string.IsNullOrWhiteSpace(connectionString);
+
+            if (isConnectionStringMissing)
+            {
+                throw new ToggleConfigurationError(CouldNotFindValueForMessage, appSettingsConnectionStringKey);
             }
         }
+
+        private string GetCommandTextFromAppSettings(IFeatureToggle toggle)
+        {
+            var sqlStatementKey = $"{ToggleConfigurationSettings.Prefix}{toggle.GetType().Name}::SqlStatement";
+
+            string sqlStatement = Configuration.Get<string>(sqlStatementKey);
+
+            bool isSqlStatementIsMissing = string.IsNullOrWhiteSpace(sqlStatement);
+
+            if (isSqlStatementIsMissing)
+            {
+                throw new ToggleConfigurationError(string.Format(TheAppSettingsKeyWasNotFound, sqlStatementKey));
+            }
+
+            return sqlStatement;
+        }
+
+#endif
 
         private string GetConnectionStringFromConfig(IFeatureToggle toggle)
         {
@@ -158,7 +227,7 @@ namespace FeatureToggle.Internal
 
             if (sqlCommandIsMissing)
             {
-                throw new ToggleConfigurationError(string.Format("The appSettings key '{0}' was not found.",
+                throw new ToggleConfigurationError(string.Format(TheAppSettingsKeyWasNotFound,
                     sqlCommandKey));
             }
 
@@ -166,13 +235,32 @@ namespace FeatureToggle.Internal
 
             if (string.IsNullOrWhiteSpace(configuredSqlCommand))
             {
-                throw new ToggleConfigurationError(string.Format("The <appSettings> value for key '{0}' is empty.", sqlCommandKey));
+                throw new ToggleConfigurationError(string.Format(AppSettingsKeyValuesIsEmptyErrorMessage, sqlCommandKey));
             }
 
             return configuredSqlCommand;
         }
+
+#endif
+
+#if NETFULL || NETCORE
+
+        private bool RunQuery(string connectionString, string sqlCommandText)
+        {
+            using (var connection = new SqlConnection(connectionString))
+            {
+                connection.Open();
+
+                using (var cmd = new SqlCommand(sqlCommandText, connection))
+                {
+                    return (bool)cmd.ExecuteScalar();
+                }
+            }
+        }
+
+#endif
+
     }
 }
 
 
-#endif
